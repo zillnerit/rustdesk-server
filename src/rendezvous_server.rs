@@ -912,6 +912,24 @@ impl RendezvousServer {
         Some(rk_res(register_pk_response::Result::OK))
     }
 
+    async fn online_response(&self, peers: &[String]) -> RendezvousMessage {
+        let mut states = BytesMut::zeroed((peers.len() + 7) / 8);
+        for (i, peer_id) in peers.iter().enumerate() {
+            if let Some(peer) = self.pm.get_in_memory(peer_id).await {
+                let elapsed = peer.read().await.last_reg_time.elapsed().as_millis() as i64;
+                if elapsed < REG_TIMEOUT {
+                    states[i / 8] |= 0x01 << (7 - i % 8);
+                }
+            }
+        }
+        let mut msg_out = RendezvousMessage::new();
+        msg_out.set_online_response(OnlineResponse {
+            states: states.into(),
+            ..Default::default()
+        });
+        msg_out
+    }
+
     async fn touch_ws_peer(&self, id: &str, addr: SocketAddr) {
         if let Some(p) = self.pm.get_in_memory(id).await {
             let mut w = p.write().await;
@@ -1343,6 +1361,12 @@ impl RendezvousServer {
                             continue;
                         }
                         if let Ok(msg_in) = RendezvousMessage::parse_from_bytes(&bytes) {
+                            if let Some(rendezvous_message::Union::OnlineRequest(or)) = &msg_in.union {
+                                // online status query (port 21115 in UDP mode) arrives here in WS mode
+                                let res = self.online_response(&or.peers).await;
+                                Self::send_to_sink(&mut sink, res).await;
+                                continue;
+                            }
                             if let Some(rendezvous_message::Union::RegisterPk(rk)) = msg_in.union {
                                 let ws_addr = match &reg {
                                     Some((_, a)) => *a,
